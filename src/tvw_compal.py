@@ -490,7 +490,7 @@ def _enumerate_r3_chips(
     """
     chips: Dict[str, _Chip] = {}
     i = _R3_SEARCH_START
-    end = min(_R3_SEARCH_END, len(data) - 64)
+    end = len(data) - 64  # NM-D562: R3 records extend beyond legacy T480 window
     while i < end:
         # Cheapest pre-check first: byte at i must be 0.
         if data[i] != 0:

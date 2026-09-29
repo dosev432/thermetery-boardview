@@ -150,7 +150,7 @@ def _component_outline(
     """Absolute outline polygon — replicates board_canvas.py's
     _component_polygon_world: shape bbox + 5-unit pad, 4 corners
     rotated about the component origin. None => renderer uses bbox."""
-    if shape is None or not shape.pins:
+    if shape is None:
         return None
     x0, y0, x1, y1 = local_bbox if local_bbox is not None else shape.bbox()
     if (x1 - x0) < 0.5 and (y1 - y0) < 0.5:
