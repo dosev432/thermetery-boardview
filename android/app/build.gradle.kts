@@ -163,7 +163,7 @@ chaquopy {
         // target version above, so the anaconda 3.11 python named in the
         // contract cannot be used. CPython 3.13 was installed with the
         // Python install manager:  py install 3.13
-        buildPython("C:/Users/Administrator/AppData/Local/Python/pythoncore-3.13-64/python.exe")
+        buildPython(System.getenv("CHAQUOPY_BUILD_PYTHON") ?: "C:/Users/Administrator/AppData/Local/Python/pythoncore-3.13-64/python.exe")
         pip {
             install("numpy==1.26.2")
         }
