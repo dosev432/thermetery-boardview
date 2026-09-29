@@ -135,6 +135,11 @@ android {
     }
 
     buildTypes {
+        debug {
+            applicationIdSuffix = ".nmd562"
+            versionNameSuffix = "-nm-d562-debug"
+        }
+
         release {
             isMinifyEnabled = false
             proguardFiles(
