@@ -751,66 +751,85 @@ def _scan_net_names(data: bytes) -> List[str]:
 def _scan_net_names_np(data: bytes) -> List[str]:
     """numpy fast path for `_scan_net_names`.
 
-    The reference loop scans every offset in the candidate region but
-    only does meaningful work where the duplicated-count header
-    (``c1 == c2`` with ``100 <= c1 <= 20000``) holds. We vector-locate
-    those header offsets (a couple thousand vs ~2.6M positions), then
-    run the identical Pascal-string walk on each, in ascending offset
-    order, returning the first that validates — exactly as the reference
-    loop does.
+    Scan the complete file at all four byte alignments using zero-copy
+    little-endian uint32 views. Candidate offsets are those where two
+    adjacent uint32 values are equal and the duplicated count is within
+    the plausible net-table range.
+
+    A table is accepted only when exactly one candidate survives the
+    complete Pascal-string walk. Missing or multiple valid candidates
+    fail closed by returning an empty list.
     """
     n = len(data)
-    lo = 0xa00000
-    hi = min(0xc40000, n - 16)
-    if hi <= lo:
-        return _scan_net_names_py(data)
-    a = _np.frombuffer(data, dtype=_np.uint8)
+    if n < 16:
+        return []
 
-    # Contiguous-slice little-endian u32 over the region (cheap; no
-    # fancy-indexing). c1 = u32 @ i, c2 = u32 @ i+4.
-    b0 = a[lo:hi].astype(_np.uint32)
-    b1 = a[lo + 1:hi + 1].astype(_np.uint32)
-    b2 = a[lo + 2:hi + 2].astype(_np.uint32)
-    b3 = a[lo + 3:hi + 3].astype(_np.uint32)
-    c1 = b0 | (b1 << 8) | (b2 << 16) | (b3 << 24)
-    d0 = a[lo + 4:hi + 4].astype(_np.uint32)
-    d1 = a[lo + 5:hi + 5].astype(_np.uint32)
-    d2 = a[lo + 6:hi + 6].astype(_np.uint32)
-    d3 = a[lo + 7:hi + 7].astype(_np.uint32)
-    c2 = d0 | (d1 << 8) | (d2 << 16) | (d3 << 24)
-    mask = (c1 == c2) & (c1 >= 100) & (c1 <= 20000)
-    cand = (_np.nonzero(mask)[0] + lo).tolist()  # ascending
+    cand: List[Tuple[int, int]] = []
 
-    for i in cand:
-        c1v = int.from_bytes(data[i:i + 4], "little")
-        # Verify the first Pascal name parses as ASCII text.
+    # Every byte offset belongs to exactly one of these four alignments.
+    # np.frombuffer creates views rather than eight full-file uint32
+    # copies, avoiding the large memory spike of the earlier approach.
+    for shift in range(4):
+        count = (n - shift) // 4
+        if count < 2:
+            continue
+
+        words = _np.frombuffer(
+            data, dtype="<u4", count=count, offset=shift
+        )
+
+        idx = _np.nonzero(
+            (words[:-1] == words[1:])
+            & (words[:-1] >= 100)
+            & (words[:-1] <= 20000)
+        )[0]
+
+        for j in idx.tolist():
+            off = shift + int(j) * 4
+            if off + 9 <= n:
+                cand.append((off, int(words[j])))
+
+    cand.sort()
+
+    found: Optional[List[str]] = None
+
+    for i, c1v in cand:
         L = data[i + 8]
         if not (1 <= L <= 80):
             continue
+
         first = data[i + 9:i + 9 + L]
-        if not all(0x20 <= b < 0x7f for b in first):
+        if len(first) != L or not all(0x20 <= b < 0x7f for b in first):
             continue
+
         nets: List[str] = []
         pos = i + 8
         ok = True
+
         for _ in range(c1v):
-            if pos >= len(data):
+            if pos >= n:
                 ok = False
                 break
+
             sL = data[pos]
-            if sL > 200 or pos + 1 + sL > len(data):
+            if sL > 200 or pos + 1 + sL > n:
                 ok = False
                 break
+
             sb = data[pos + 1:pos + 1 + sL]
             if not all(0x20 <= b < 0x7f for b in sb):
                 ok = False
                 break
+
             nets.append(sb.decode("ascii"))
             pos += 1 + sL
-        if ok and len(nets) == c1v:
-            return nets
-    return []
 
+        if ok and len(nets) == c1v:
+            if found is not None:
+                return []
+            found = nets
+
+    return found if found is not None else []
 
 def _scan_net_names_py(data: bytes) -> List[str]:
     """Pure-Python reference implementation of `_scan_net_names`.
@@ -818,9 +837,10 @@ def _scan_net_names_py(data: bytes) -> List[str]:
     Kept as the canonical fallback; the numpy fast path above must
     produce an identical result.
     """
-    # Scan a likely region. The table sits roughly between the chip
-    # tables and the master pool on Compal/Lenovo files.
-    for i in range(0xa00000, min(0xc40000, len(data) - 16), 1):
+    # Scan the complete file. Valid tables are accepted only when
+    # exactly one candidate survives the full Pascal-string walk.
+    found: Optional[List[str]] = None
+    for i in range(0, len(data) - 16, 1):
         c1 = int.from_bytes(data[i:i+4], "little")
         if not (100 <= c1 <= 20000):
             continue
@@ -855,8 +875,10 @@ def _scan_net_names_py(data: bytes) -> List[str]:
             nets.append(sb.decode("ascii"))
             pos += 1 + sL
         if ok and len(nets) == c1:
-            return nets
-    return []
+            if found is not None:
+                return []
+            found = nets
+    return found if found is not None else []
 
 
 # --------------------------------------------------------------------------
