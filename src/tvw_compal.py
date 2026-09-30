@@ -146,7 +146,8 @@ class _Chip:
     f2: int             # bbox-anchor Y (canonical pin transform origin)
     f3: int             # bbox-anchor X
     rot: int            # rotation (0 / 90 / 180 / 270)
-    fp_id: int          # footprint ID, maps to master at fp_id - 1
+    fp_id: int          # raw footprint ID from the chip record
+    footprint_name: str # packed Pascal slot 3; canonical footprint identity
     # uint32 at after-Pascal +32..+35. Encodes a chip-type enum used
     # by the file format to discriminate pin-layout conventions. Known
     # values on T480: 0=IC/BGA, 1=LED/Diode, 2=MOSFET, 3=Resistor,
@@ -615,7 +616,8 @@ def _enumerate_r3_chips(
             chips[refdes] = _Chip(
                 refdes=refdes, record_off=i + 4,
                 Y=Y, X=X, f0=f0, f1=f1, f2=f2, f3=f3,
-                rot=rot, fp_id=fp_id, chip_class=chip_class,
+                rot=rot, fp_id=fp_id, footprint_name=_fp_name_dup,
+                chip_class=chip_class,
                 device_value=device_value, tolerance=tolerance,
                 part_code=part_code, pins=pin_records,
             )
@@ -1045,6 +1047,10 @@ def parse(path: Path, data: Optional[bytes] = None) -> BoardModel:
         ]
         return model
 
+    masters_by_name: Dict[str, List[_Master]] = {}
+    for m in masters.values():
+        masters_by_name.setdefault(m.name, []).append(m)
+
     r1 = _scan_r1_layers(data)
     cap_layers = _scan_cap_section_layers(data)
     r3_chips = _enumerate_r3_chips(data, masters)
@@ -1052,12 +1058,21 @@ def parse(path: Path, data: Optional[bytes] = None) -> BoardModel:
     pad_index = _build_pad_index(data)
 
     n_no_master_pins = 0
+    n_master_resolution_failures = 0
     n_pin_net_hits = 0
     n_pin_net_misses = 0
     for refdes, chip in r3_chips.items():
-        master = masters[chip.fp_id - 1]
-        layer = _determine_layer(refdes, master.name, r1, cap_layers)
-        shape_name = f"_compal_{master.name}_{refdes}"
+        candidates = masters_by_name.get(chip.footprint_name, [])
+        pinful = [m for m in candidates if m.pin_locals]
+        if len(pinful) == 1 and len(pinful[0].pin_locals) == len(chip.pins):
+            master: Optional[_Master] = pinful[0]
+        elif len(pinful) == 0 and len(candidates) == 1:
+            master = candidates[0]
+        else:
+            master = None
+        master_name = master.name if master is not None else chip.footprint_name
+        layer = _determine_layer(refdes, master_name, r1, cap_layers)
+        shape_name = f"_compal_{master_name}_{refdes}"
         shape = Shape(name=shape_name)
 
         # Build a lookup of master_pin_idx -> (display_pin_number, name)
@@ -1070,7 +1085,7 @@ def parse(path: Path, data: Optional[bytes] = None) -> BoardModel:
             for (m_idx, pin_disp, pin_name) in chip.pins
         }
 
-        if master.pin_locals:
+        if master is not None and master.pin_locals:
             for pin_idx, (A, B) in enumerate(master.pin_locals):
                 world_Y, world_X = _pin_local_to_world(chip, A, B, layer)
                 dx, dy = _world_to_chip_local(chip, world_Y, world_X)
@@ -1097,7 +1112,10 @@ def parse(path: Path, data: Optional[bytes] = None) -> BoardModel:
             ys = [p[2] for p in shape.pins]
             shape.bbox_override = (min(xs), min(ys), max(xs), max(ys))
         else:
-            n_no_master_pins += 1
+            if master is None:
+                n_master_resolution_failures += 1
+            else:
+                n_no_master_pins += 1
             shape.bbox_override = (-1000.0, -1000.0, 1000.0, 1000.0)
 
         model.shapes[shape_name] = shape
@@ -1108,7 +1126,7 @@ def parse(path: Path, data: Optional[bytes] = None) -> BoardModel:
         if chip.device_value and chip.device_value != "*":
             device_label = chip.device_value
         else:
-            device_label = master.name
+            device_label = master_name
         comp = Component(
             refdes=refdes, x=float(chip.X), y=float(chip.Y),
             layer=layer, rotation=float(chip.rot),
@@ -1123,6 +1141,11 @@ def parse(path: Path, data: Optional[bytes] = None) -> BoardModel:
             f"{n_no_master_pins} chips reference master footprints "
             f"with no pin-coordinate records (rendered as placeholder "
             f"bboxes).")
+    if n_master_resolution_failures:
+        warns.append(
+            f"{n_master_resolution_failures} chips failed deterministic "
+            f"exact-name master resolution and were rendered fail-closed "
+            f"without pin geometry.")
     if not nets:
         warns.append(
             "net-name table not found — net browsing will show no "
